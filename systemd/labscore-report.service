@@ -1,0 +1,8 @@
+[Unit]
+Description=Lab Score monthly PDF report
+
+[Service]
+Type=oneshot
+EnvironmentFile=/home/redos/labscore/labscore.env
+WorkingDirectory=/home/redos/labscore
+ExecStart=/usr/bin/python3 /home/redos/labscore/labscore_report.py

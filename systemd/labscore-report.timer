@@ -1,0 +1,9 @@
+[Unit]
+Description=Lab Score monthly PDF report (1-е число, 09:11)
+
+[Timer]
+OnCalendar=*-*-01 09:11:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
