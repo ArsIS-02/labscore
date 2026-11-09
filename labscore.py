@@ -5,7 +5,8 @@
 техники MITRE) и шлёт одно GELF-событие — Graylog превращает его в письмо.
 
 ENV: LS_GRAYLOG_URL (по умолчанию http://127.0.0.1:9000), LS_GRAYLOG_USER/PASS,
-     LS_WIKI_DB (~/homewiki/data/homewiki.db), LS_GELF_HOST/PORT (127.0.0.1:12206)
+     LS_WIKI_DB (~/homewiki/data/homewiki.db), LS_GELF_HOST/PORT (127.0.0.1:12206),
+     LS_BB_DB (~/blockboard/data/blockboard.db)
 """
 import base64, gzip, json, os, socket, sqlite3, ssl, time, urllib.request
 from pathlib import Path
@@ -14,6 +15,7 @@ GRAYLOG = os.environ.get("LS_GRAYLOG_URL", "http://127.0.0.1:9000").rstrip("/")
 USER = os.environ.get("LS_GRAYLOG_USER", "admin")
 PASS = os.environ.get("LS_GRAYLOG_PASS", "admin")
 WIKI_DB = Path(os.environ.get("LS_WIKI_DB", "~/homewiki/data/homewiki.db")).expanduser()
+BB_DB = Path(os.environ.get("LS_BB_DB", "~/blockboard/data/blockboard.db")).expanduser()
 GELF_HOST = os.environ.get("LS_GELF_HOST", "127.0.0.1")
 GELF_PORT = int(os.environ.get("LS_GELF_PORT", "12206"))
 HOST = socket.gethostname()
@@ -67,7 +69,23 @@ def wiki_metrics():
     return len(rules), covered, len(techs)
 
 
-def compose(rules_total, alerts, top, wiki_rules, covered, techs):
+def blockboard_metrics(week_ago):
+    """Блокировки BlockBoard: активные, добавленные и снятые за неделю."""
+    if not BB_DB.exists():
+        return 0, 0, 0
+    con = sqlite3.connect(BB_DB)
+    try:
+        active = con.execute("SELECT COUNT(*) FROM blocks WHERE active=1").fetchone()[0]
+        added = con.execute("SELECT COUNT(*) FROM blocks WHERE created>=?", (week_ago,)).fetchone()[0]
+        removed = con.execute(
+            "SELECT COUNT(*) FROM history WHERE ts>=? AND action IN ('unblock','expire')",
+            (week_ago,)).fetchone()[0]
+    finally:
+        con.close()
+    return active, added, removed
+
+
+def compose(rules_total, alerts, top, wiki_rules, covered, techs, bb_active, bb_added, bb_removed):
     """Текст отчёта и словарь метрик (отдельно для тестов)."""
     pct = round(100 * covered / wiki_rules) if wiki_rules else 0
     lines = [
@@ -75,11 +93,14 @@ def compose(rules_total, alerts, top, wiki_rules, covered, techs):
         f"Срабатываний за неделю: {alerts}",
         f"Рунбуки HomeWiki: {covered} из {wiki_rules} правил ({pct}%)",
         f"Техник MITRE ATT&CK в привязках: {techs}",
+        f"Блокировки BlockBoard: {bb_active} активных (+{bb_added} / −{bb_removed} за неделю)",
         "Топ недели: " + ("; ".join(f"{t} — {n}" for t, n in top) if top else "тишина"),
     ]
     metrics = {"ls_rules": rules_total, "ls_alerts_week": alerts,
                "ls_wiki_rules": wiki_rules, "ls_wiki_covered": covered,
-               "ls_wiki_pct": pct, "ls_techniques": techs}
+               "ls_wiki_pct": pct, "ls_techniques": techs,
+               "ls_bb_active": bb_active, "ls_bb_added_week": bb_added,
+               "ls_bb_removed_week": bb_removed}
     return "\n".join(lines), metrics
 
 
@@ -95,7 +116,9 @@ def send_gelf(short, fields):
 def main():
     rules_total, alerts, top = graylog_metrics()
     wiki_rules, covered, techs = wiki_metrics()
-    text, metrics = compose(rules_total, alerts, top, wiki_rules, covered, techs)
+    bb_active, bb_added, bb_removed = blockboard_metrics(time.time() - 7 * 86400)
+    text, metrics = compose(rules_total, alerts, top, wiki_rules, covered, techs,
+                            bb_active, bb_added, bb_removed)
     send_gelf("labscore: еженедельный отчёт зрелости", {
         **metrics, "tool": "labscore", "homelab_app": "labscore",
         "ls_event": "weekly", "ls_text": text,
