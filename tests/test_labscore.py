@@ -61,3 +61,17 @@ def test_blockboard_metrics_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(labscore, "BB_DB", db)
     active, added, removed = blockboard_metrics(now - 7 * 86400)
     assert active == 3 and added == 3 and removed == 2
+
+
+def test_compose_with_glpi():
+    g = {"total": 10, "open": 3, "closed_week": 5, "mttr_h": 2.5}
+    text, m = compose(10, 1, [], 10, 5, 3, 0, 0, 0, g)
+    assert "Тикеты GLPI: 3 открытых из 10" in text
+    assert "MTTR 2.5 ч" in text and "MTTD < 1 мин" in text
+    assert m["ls_glpi_open"] == 3 and m["ls_glpi_mttr_h"] == 2.5
+
+
+def test_compose_glpi_no_mttr():
+    g = {"total": 2, "open": 2, "closed_week": 0, "mttr_h": None}
+    text, m = compose(10, 1, [], 10, 5, 3, 0, 0, 0, g)
+    assert "MTTR" not in text and "ls_glpi_mttr_h" not in m

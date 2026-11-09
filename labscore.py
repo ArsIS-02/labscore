@@ -18,6 +18,9 @@ WIKI_DB = Path(os.environ.get("LS_WIKI_DB", "~/homewiki/data/homewiki.db")).expa
 BB_DB = Path(os.environ.get("LS_BB_DB", "~/blockboard/data/blockboard.db")).expanduser()
 GELF_HOST = os.environ.get("LS_GELF_HOST", "127.0.0.1")
 GELF_PORT = int(os.environ.get("LS_GELF_PORT", "12206"))
+GLPI = os.environ.get("LS_GLPI_URL", "http://192.168.1.149/glpi").rstrip("/")
+GLPI_APP = os.environ.get("LS_GLPI_APP_TOKEN", "")
+GLPI_USER = os.environ.get("LS_GLPI_USER_TOKEN", "")
 HOST = socket.gethostname()
 
 CTX = ssl.create_default_context()
@@ -85,7 +88,58 @@ def blockboard_metrics(week_ago):
     return active, added, removed
 
 
-def compose(rules_total, alerts, top, wiki_rules, covered, techs, bb_active, bb_added, bb_removed):
+def glpi_metrics(week_ago):
+    """SOC-метрики по тикетам GLPI: открытые, закрытые за неделю, MTTR.
+
+    MTTD у нас около нуля (тикет создаётся автоматически через TicketBridge
+    в ту же минуту, что и алерт), поэтому считаем только MTTR — среднее
+    время от создания до закрытия тикета. GLPI недоступен → None.
+    """
+    if not (GLPI_APP and GLPI_USER):
+        return None
+    base = GLPI + "/apirest.php"
+    hdr = {"Content-Type": "application/json", "App-Token": GLPI_APP}
+    try:
+        req = urllib.request.Request(base + "/initSession",
+                                     headers={**hdr, "Authorization": "user_token " + GLPI_USER})
+        with urllib.request.urlopen(req, context=CTX, timeout=15) as r:
+            hdr["Session-Token"] = json.load(r)["session_token"]
+        req = urllib.request.Request(base + "/Ticket?range=0-999&order=DESC", headers=hdr)
+        with urllib.request.urlopen(req, context=CTX, timeout=30) as r:
+            tickets = json.load(r)
+    except Exception:
+        return None
+    finally:
+        if "Session-Token" in hdr:
+            try:
+                urllib.request.urlopen(urllib.request.Request(base + "/killSession",
+                                       headers=hdr), context=CTX, timeout=10)
+            except Exception:
+                pass
+
+    def ts(s):
+        try:
+            return time.mktime(time.strptime((s or "")[:19], "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return None
+
+    open_cnt, closed_week, durations = 0, 0, []
+    for t in tickets:
+        c = ts(t.get("closedate"))
+        if c:
+            if c >= week_ago:
+                closed_week += 1
+                cr = ts(t.get("date_creation"))
+                if cr:
+                    durations.append(c - cr)
+        else:
+            open_cnt += 1
+    return {"total": len(tickets), "open": open_cnt, "closed_week": closed_week,
+            "mttr_h": round(sum(durations) / 3600 / len(durations), 1) if durations else None}
+
+
+def compose(rules_total, alerts, top, wiki_rules, covered, techs, bb_active, bb_added, bb_removed,
+            glpi=None):
     """Текст отчёта и словарь метрик (отдельно для тестов)."""
     pct = round(100 * covered / wiki_rules) if wiki_rules else 0
     lines = [
@@ -94,13 +148,25 @@ def compose(rules_total, alerts, top, wiki_rules, covered, techs, bb_active, bb_
         f"Рунбуки HomeWiki: {covered} из {wiki_rules} правил ({pct}%)",
         f"Техник MITRE ATT&CK в привязках: {techs}",
         f"Блокировки BlockBoard: {bb_active} активных (+{bb_added} / −{bb_removed} за неделю)",
-        "Топ недели: " + ("; ".join(f"{t} — {n}" for t, n in top) if top else "тишина"),
     ]
+    if glpi:
+        line = (f"Тикеты GLPI: {glpi['open']} открытых из {glpi['total']}, "
+                f"закрыто за неделю: {glpi['closed_week']}")
+        if glpi["mttr_h"] is not None:
+            line += f", MTTR {glpi['mttr_h']} ч"
+        line += " (заведение автоматическое: MTTD < 1 мин)"
+        lines.append(line)
+    lines.append("Топ недели: " + ("; ".join(f"{t} — {n}" for t, n in top) if top else "тишина"))
     metrics = {"ls_rules": rules_total, "ls_alerts_week": alerts,
                "ls_wiki_rules": wiki_rules, "ls_wiki_covered": covered,
                "ls_wiki_pct": pct, "ls_techniques": techs,
                "ls_bb_active": bb_active, "ls_bb_added_week": bb_added,
                "ls_bb_removed_week": bb_removed}
+    if glpi:
+        metrics.update({"ls_glpi_total": glpi["total"], "ls_glpi_open": glpi["open"],
+                        "ls_glpi_closed_week": glpi["closed_week"]})
+        if glpi["mttr_h"] is not None:
+            metrics["ls_glpi_mttr_h"] = glpi["mttr_h"]
     return "\n".join(lines), metrics
 
 
@@ -114,11 +180,13 @@ def send_gelf(short, fields):
 
 
 def main():
+    week_ago = time.time() - 7 * 86400
     rules_total, alerts, top = graylog_metrics()
     wiki_rules, covered, techs = wiki_metrics()
-    bb_active, bb_added, bb_removed = blockboard_metrics(time.time() - 7 * 86400)
+    bb_active, bb_added, bb_removed = blockboard_metrics(week_ago)
+    glpi = glpi_metrics(week_ago)
     text, metrics = compose(rules_total, alerts, top, wiki_rules, covered, techs,
-                            bb_active, bb_added, bb_removed)
+                            bb_active, bb_added, bb_removed, glpi)
     send_gelf("labscore: еженедельный отчёт зрелости", {
         **metrics, "tool": "labscore", "homelab_app": "labscore",
         "ls_event": "weekly", "ls_text": text,
