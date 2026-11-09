@@ -1,0 +1,9 @@
+[Unit]
+Description=Lab Score weekly timer (понедельник 09:23)
+
+[Timer]
+OnCalendar=Mon *-*-* 09:23:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

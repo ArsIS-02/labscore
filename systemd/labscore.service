@@ -1,0 +1,7 @@
+[Unit]
+Description=Lab Score weekly maturity report
+
+[Service]
+Type=oneshot
+EnvironmentFile=/home/redos/labscore/labscore.env
+ExecStart=/usr/bin/python3 /home/redos/labscore/labscore.py
